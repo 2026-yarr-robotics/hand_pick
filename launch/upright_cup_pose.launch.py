@@ -56,6 +56,17 @@ def generate_launch_description():
             description="pick point 가 이 거리(px) 안인 같은 클래스 중복 검출은 "
                         "conf 높은 것만 남김. 0 이하면 비활성.",
         ),
+        # ── 시간 평활/트래킹 (base_link) ──
+        DeclareLaunchArgument(
+            "enable_temporal_smoothing", default_value="true",
+            description="프레임 간 컵 추적 후 EMA 평활 + outlier 제거. per-frame 튐 억제.",
+        ),
+        DeclareLaunchArgument("track_match_dist", default_value="0.08"),
+        DeclareLaunchArgument("smoothing_alpha", default_value="0.4"),
+        DeclareLaunchArgument("track_outlier_dist", default_value="0.04"),
+        DeclareLaunchArgument("track_reacquire_frames", default_value="4"),
+        DeclareLaunchArgument("track_timeout_sec", default_value="0.5"),
+        DeclareLaunchArgument("track_min_hits", default_value="2"),
         # ── pick point: mask 에서 "원(rim)" 중심 산출 방식 ──
         DeclareLaunchArgument(
             "pick_point_method", default_value="inscribed",
@@ -119,6 +130,13 @@ def generate_launch_description():
                 "target_class_name": LaunchConfiguration("target_class_name"),
                 "min_mask_area": LaunchConfiguration("min_mask_area"),
                 "dedup_min_dist_px": LaunchConfiguration("dedup_min_dist_px"),
+                "enable_temporal_smoothing": LaunchConfiguration("enable_temporal_smoothing"),
+                "track_match_dist": LaunchConfiguration("track_match_dist"),
+                "smoothing_alpha": LaunchConfiguration("smoothing_alpha"),
+                "track_outlier_dist": LaunchConfiguration("track_outlier_dist"),
+                "track_reacquire_frames": LaunchConfiguration("track_reacquire_frames"),
+                "track_timeout_sec": LaunchConfiguration("track_timeout_sec"),
+                "track_min_hits": LaunchConfiguration("track_min_hits"),
 
                 "pick_point_method": LaunchConfiguration("pick_point_method"),
                 "hough_dp": LaunchConfiguration("hough_dp"),

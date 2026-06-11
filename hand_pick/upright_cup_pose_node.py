@@ -145,6 +145,89 @@ def classify_color_bgr(mean_bgr):
     return "red"
 
 
+class CupTracker:
+    """base_link 공간 컵 트래커 — 프레임 간 매칭 후 EMA 평활 + outlier 제거.
+
+    정지 컵은 base_link 에서 좌표가 고정이므로(카메라가 움직여도), base 공간에서
+    평활하면 카메라 모션과 무관하게 per-frame 튐(볼트구멍 오선택 등)을 걸러낸다.
+    단발 outlier 는 무시(평활값 유지), 같은 방향으로 연속되면 컵이 실제로 옮겨진
+    것으로 보고 재획득한다. 트랙 id 는 안정적으로 유지해 마커 id 로도 쓴다.
+    """
+
+    def __init__(self, match_dist, alpha, outlier_dist, reacquire_frames,
+                 timeout_sec, min_hits):
+        self.match_dist = float(match_dist)
+        self.alpha = float(alpha)
+        self.outlier_dist = float(outlier_dist)
+        self.reacquire_frames = int(reacquire_frames)
+        self.timeout_sec = float(timeout_sec)
+        self.min_hits = int(min_hits)
+        self.tracks = []          # 각 트랙: dict(id,xyz,color,last_seen,hits,outliers)
+        self._next_id = 0
+
+    def update(self, cups, now_sec):
+        """cups: [{"xy_base":(x,y),"z_base":z,"color":str,...}] → 평활된 cups 반환."""
+        meas = [np.array([c["xy_base"][0], c["xy_base"][1], c["z_base"]], float)
+                for c in cups]
+
+        # ── 그리디 최근접 매칭 (xy 거리 ≤ match_dist) ──
+        pairs = []
+        for mi, p in enumerate(meas):
+            for ti, tr in enumerate(self.tracks):
+                d = math.hypot(p[0] - tr["xyz"][0], p[1] - tr["xyz"][1])
+                if d <= self.match_dist:
+                    pairs.append((d, mi, ti))
+        pairs.sort(key=lambda x: x[0])
+        m_used, t_used = set(), set()
+        for d, mi, ti in pairs:
+            if mi in m_used or ti in t_used:
+                continue
+            m_used.add(mi); t_used.add(ti)
+            self._update_track(self.tracks[ti], meas[mi], cups[mi], now_sec)
+
+        # ── 매칭 안 된 측정 → 새 트랙 ──
+        for mi, p in enumerate(meas):
+            if mi in m_used:
+                continue
+            self.tracks.append({
+                "id": self._next_id, "xyz": p.copy(),
+                "color": cups[mi]["color"], "last_seen": now_sec,
+                "hits": 1, "outliers": 0,
+            })
+            self._next_id += 1
+
+        # ── 오래된 트랙 폐기 ──
+        self.tracks = [t for t in self.tracks
+                       if now_sec - t["last_seen"] <= self.timeout_sec]
+
+        # ── 이번 프레임에 관측되고 충분히 확인된 트랙만 발행 ──
+        out = []
+        for t in self.tracks:
+            if t["last_seen"] == now_sec and t["hits"] >= self.min_hits:
+                out.append({
+                    "xy_base": (float(t["xyz"][0]), float(t["xyz"][1])),
+                    "z_base": float(t["xyz"][2]),
+                    "color": t["color"], "id": int(t["id"]),
+                })
+        return out
+
+    def _update_track(self, tr, p, cup, now_sec):
+        resid = math.hypot(p[0] - tr["xyz"][0], p[1] - tr["xyz"][1])
+        if resid > self.outlier_dist:
+            # 단발 outlier 는 무시(평활값 유지). 연속되면 컵이 실제 이동 → 재획득.
+            tr["outliers"] += 1
+            if tr["outliers"] >= self.reacquire_frames:
+                tr["xyz"] = p.copy()
+                tr["outliers"] = 0
+        else:
+            a = self.alpha
+            tr["xyz"] = (1.0 - a) * tr["xyz"] + a * p
+            tr["outliers"] = 0
+        tr["color"] = cup["color"]
+        tr["last_seen"] = now_sec
+        tr["hits"] += 1
+
+
 class UprightCupPoseNode(Node):
     """hand-eye 카메라 → base_link 변환까지 떠안고 /hand_eye/boxes 를 내는 비전 노드.
 
@@ -179,6 +262,20 @@ class UprightCupPoseNode(Node):
         # 중복 검출 제거: pick point 가 이 거리(px) 안인 같은 클래스 검출은
         # conf 높은 것만 남긴다. 0 이하면 비활성. (YOLO NMS 가 못 거른 겹침 정리)
         self.declare_parameter("dedup_min_dist_px", 25.0)
+
+        # ── 시간 평활/트래킹 (base_link 공간) ────────────────
+        # 검출 컵을 프레임 간 추적해 EMA 평활 + outlier(볼트구멍 오선택 등) 제거.
+        # hand-eye 카메라가 움직여도 정지 컵은 base_link 에서 고정이라 base 공간에서
+        # 평활하면 카메라 모션과 무관하게 튐을 걸러낸다.
+        self.declare_parameter("enable_temporal_smoothing", True)
+        # match_dist 는 컵 간격(≈0.10m)보다 작고 outlier_dist 보다는 커야 한다
+        # (outlier 측정이 트랙에 붙어서 게이트로 걸러지도록).
+        self.declare_parameter("track_match_dist", 0.08)     # 같은 컵 매칭 거리(m)
+        self.declare_parameter("smoothing_alpha", 0.4)        # EMA 계수(클수록 빠름)
+        self.declare_parameter("track_outlier_dist", 0.04)    # 이 이상 튀면 outlier(m)
+        self.declare_parameter("track_reacquire_frames", 4)   # 연속 outlier 시 재획득
+        self.declare_parameter("track_timeout_sec", 0.5)      # 미검출 트랙 폐기(s)
+        self.declare_parameter("track_min_hits", 2)           # 발행 전 최소 관측수
 
         # ── pick point 산출 방식 ────────────────────────────
         # 똑바로 선 컵을 위에서 보면 윗면 원(rim)이 보이는데, seg mask 에 옆면이
@@ -233,6 +330,17 @@ class UprightCupPoseNode(Node):
         self.min_mask_area = float(self.get_parameter("min_mask_area").value)
         self.dedup_min_dist_px = float(
             self.get_parameter("dedup_min_dist_px").value)
+
+        self.enable_temporal_smoothing = as_bool(
+            self.get_parameter("enable_temporal_smoothing").value)
+        self.tracker = CupTracker(
+            match_dist=float(self.get_parameter("track_match_dist").value),
+            alpha=float(self.get_parameter("smoothing_alpha").value),
+            outlier_dist=float(self.get_parameter("track_outlier_dist").value),
+            reacquire_frames=int(self.get_parameter("track_reacquire_frames").value),
+            timeout_sec=float(self.get_parameter("track_timeout_sec").value),
+            min_hits=int(self.get_parameter("track_min_hits").value),
+        )
 
         self.pick_point_method = str(
             self.get_parameter("pick_point_method").value).strip().lower()
@@ -699,7 +807,12 @@ class UprightCupPoseNode(Node):
                 "center": (float(u), float(v)),
             })
 
-        self.publish_boxes(cups)
+        # 시간 평활/트래킹 (base_link 공간): per-frame 튐·outlier 제거.
+        if self.enable_temporal_smoothing:
+            published = self.tracker.update(cups, time.time())
+        else:
+            published = cups
+        self.publish_boxes(published)
 
         # ── debug 시각화 ──
         for det in targets:
@@ -717,14 +830,14 @@ class UprightCupPoseNode(Node):
             cv2.circle(debug, (int(c[0]), int(c[1])), 4, (0, 0, 255), -1)
         cv2.putText(
             debug,
-            f"upright cups={len(targets)} published={len(cups)} "
-            f"pick={self.pick_point_method}",
+            f"upright cups={len(targets)} published={len(published)} "
+            f"pick={self.pick_point_method} smooth={self.enable_temporal_smoothing}",
             (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         self.publish_debug(debug, msg.header)
 
         elapsed = (time.time() - start) * 1000.0
         self.get_logger().info(
-            f"upright cups={len(targets)} published(base)={len(cups)} "
+            f"upright cups={len(targets)} base={len(cups)} published={len(published)} "
             f"time={elapsed:.1f} ms")
 
     # ── Publish ───────────────────────────────────────────────
@@ -743,12 +856,13 @@ class UprightCupPoseNode(Node):
             x, y = cup["xy_base"]
             z = cup["z_base"]
             color = cup["color"]
+            mid = int(cup.get("id", i))   # 트래커 안정 id(있으면) 사용
 
             top = Marker()
             top.header.frame_id = self.base_frame
             top.header.stamp = now
             top.ns = "box_top"
-            top.id = i
+            top.id = mid
             top.action = Marker.ADD
             top.type = Marker.SPHERE
             top.pose.position.x = x
@@ -761,14 +875,14 @@ class UprightCupPoseNode(Node):
             label.header.frame_id = self.base_frame
             label.header.stamp = now
             label.ns = "box_labels"
-            label.id = i
+            label.id = mid
             label.action = Marker.ADD
             label.type = Marker.TEXT_VIEW_FACING
             label.pose.position.x = x
             label.pose.position.y = y
             label.pose.position.z = z
             label.pose.orientation.w = 1.0
-            label.text = f"#{i}_c={color}_upright-cup"
+            label.text = f"#{mid}_c={color}_upright-cup"
             markers.markers.append(label)
 
         self.boxes_pub.publish(markers)

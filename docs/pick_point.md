@@ -79,6 +79,28 @@ YOLO NMS(`iou`)가 못 거른 겹친 중복 검출(같은 컵이 IoU 임계 바�
 > 예: 한 컵이 `(546,406) conf=0.66` / `(546,405) conf=0.65` 로 0.7px 차이로 이중
 > 검출되던 것을 conf 높은 하나로 합쳐, 검출 수 5→4 로 정정됨.
 
+## 시간 평활 / 트래킹 (`enable_temporal_smoothing`)
+
+영상에서 보면 단일 프레임 pick 은 흔들리고, 특히 `top_hole` 은 **구멍이 여러 개인
+부품(center + 볼트홀)에서 ~10% 빈도로 볼트홀을 오선택**한다(영상 627프레임 검증).
+이를 줄이기 위해 검출 컵을 **base_link 공간**에서 프레임 간 추적해 평활한다.
+
+- **base 공간 평활**: hand-eye 카메라가 움직여도 정지 컵은 base_link 에서 고정이라,
+  카메라 모션과 무관하게 튐만 걸러진다(이미지 공간 평활이면 모션에 끌려감).
+- **매칭→EMA→outlier 게이트**: 최근접 트랙(`track_match_dist`)에 붙여 `smoothing_alpha`
+  로 EMA. 측정이 평활값에서 `track_outlier_dist`(기본 4cm) 이상 튀면 **단발 outlier 로
+  보고 무시(평활값 유지)**, `track_reacquire_frames` 연속되면 컵이 실제 이동한 것으로
+  재획득. `track_match_dist`(기본 8cm)는 컵 간격(≈10cm)보다 작고 `track_outlier_dist`
+  보다 커야 한다(outlier 가 트랙에 붙어 게이트로 걸러지도록).
+- 트랙 id 는 안정적으로 유지돼 마커 id(`box_top`/`box_labels`)로도 쓰인다.
+
+> 단위검증: 정지 컵에 5cm outlier 2프레임을 주입해도 published 좌표가 참값 ±2mm 로
+> 유지(게이트가 차단), 일반 잡음(±5mm)은 ~2mm 로 평활됨.
+
+**권장 조합(robust)**: `pick_point_method:=inscribed`(부품 축 중심, 구멍 무시 →
+볼트홀 오선택 원천 제거) + 시간 평활(잔여 jitter·outlier 제거). `top_hole` 은 입구가
+하나로 깨끗한 컵에서만 권장.
+
 ### 재현 / 실환경 확인
 
 ```bash
