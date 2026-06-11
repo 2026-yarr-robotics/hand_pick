@@ -17,12 +17,34 @@
 
 | 값 | 방식 | 특징 |
 |---|---|---|
+| `top_hole` | 윗면 **도넛 홀(어두운 중앙 구멍)** 중심 | 컵 입구/관통홀의 진짜 원 중심을 잡는다. seg mask 는 채워진 실루엣이라 이미지에서 직접 검출. 실패 시 `inscribed` 폴백. (강건성 설계는 아래 참고) |
 | `inscribed` (기본) | distance transform 최댓값 위치 = **가장 큰 내접원 중심** | 길쭉한 옆면 꼬리를 무시하고 둥근 윗부분 중심을 잡음. 파라미터 튜닝 불필요, 가장 강건. |
 | `hough` | 이미지에서 `HoughCircles` 로 rim 원을 직접 검출 | '원 검출'에 가장 직접적이나 조명/로고 텍스처에 민감, 반경 튜닝 필요. 실패 시 `inscribed` 폴백. |
 | `centroid` | 기존 moments 무게중심 | 변경 없음 — 비교/폴백용. |
 
 `hough` 튜닝값: `hough_dp`, `hough_param1`, `hough_param2`,
 `hough_min_radius_ratio`, `hough_max_radius_ratio` (반경 비율은 contour bbox 짧은 변 기준).
+
+### `top_hole` — 윗면 도넛 홀 검출과 조명 강건성
+
+seg mask 만으로는 도넛을 못 뽑는다(채워진 실루엣). 그래서 mask 내부 **이미지**에서
+어두운 중앙 구멍을 찾는데, 단순 밝기 임계는 조명에 약하므로 다음을 적용했다.
+
+1. **탐색 범위를 윗면(top face)으로 한정** — 내접원 디스크(`×top_hole_face_ratio`)
+   안만 본다. 옆면 몸통 그림자가 '어두운 영역'으로 오검출되는 걸 원천 차단.
+2. **Otsu 자동 임계** — 절대 밝기가 아니라 윗면 픽셀의 림(밝음)/홀(어두움) 분포의
+   골을 찾아 갈라 조명 변화에 적응. Otsu 가 비정상으로 높으면
+   `top_hole_dark_percentile` 상한으로 가드.
+3. **원형도+중심성+면적 점수화** — 볼트구멍 등 작은 잡음과 비원형 그림자를 배제하고
+   가장 그럴듯한 중앙 큰 홀만 채택(`top_hole_min_circularity`,
+   `top_hole_min/max_area_frac`).
+4. **중심은 무게중심(moments)** — minEnclosingCircle 중심보다 외곽 노이즈에 덜 흔들림.
+5. **폴백 체인** `top_hole → inscribed → centroid` — 홀이 안 보이는 가파른 각도·가림에선
+   엉뚱한 값 대신 내접원으로 안전 복귀.
+
+튜닝값: `top_hole_face_ratio`(0.95), `top_hole_min_circularity`(0.45),
+`top_hole_dark_percentile`(35), `top_hole_min_area_frac`(0.01),
+`top_hole_max_area_frac`(0.7).
 
 ### 합성 mask 수치 검증
 

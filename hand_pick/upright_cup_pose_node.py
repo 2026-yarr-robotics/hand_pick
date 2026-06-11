@@ -181,7 +181,8 @@ class UprightCupPoseNode(Node):
         # 똑바로 선 컵을 위에서 보면 윗면 원(rim)이 보이는데, seg mask 에 옆면이
         # 같이 잡혀 길쭉해지면 moments 무게중심이 원 중심에서 벗어난다. 그래서
         # mask 에서 "원 부분"만 다시 잡아 그 중심을 pick point 로 쓴다.
-        #   inscribed : distance transform 최댓값 위치 = 가장 큰 내접원 중심 (기본, 강건)
+        #   top_hole  : 윗면 도넛 홀(어두운 중앙 구멍) 중심 — 컵 입구/관통홀 정밀 pick
+        #   inscribed : distance transform 최댓값 위치 = 가장 큰 내접원 중심 (강건 기본)
         #   hough     : 이미지에서 HoughCircles 로 rim 원을 직접 검출
         #   centroid  : 기존 moments 무게중심 (변경 없음)
         self.declare_parameter("pick_point_method", "inscribed")
@@ -191,6 +192,13 @@ class UprightCupPoseNode(Node):
         self.declare_parameter("hough_param2", 25.0)
         self.declare_parameter("hough_min_radius_ratio", 0.25)
         self.declare_parameter("hough_max_radius_ratio", 0.75)
+        # top_hole 튜닝값. 밝기 임계는 Otsu(조명 자동적응)를 기본으로 쓰고
+        # dark_percentile 은 Otsu 가 비정상일 때의 안전 상한이다.
+        self.declare_parameter("top_hole_face_ratio", 0.95)      # 윗면 탐색 반경 = 내접원 r×이값
+        self.declare_parameter("top_hole_min_circularity", 0.45)  # 원형도 하한(그림자 제거)
+        self.declare_parameter("top_hole_dark_percentile", 35.0)  # Otsu 안전 상한(%)
+        self.declare_parameter("top_hole_min_area_frac", 0.01)    # 윗면 대비 홀 최소 면적비
+        self.declare_parameter("top_hole_max_area_frac", 0.7)     # 윗면 대비 홀 최대 면적비
 
         # ── 좌표 변환 (camera → base_link) ──────────────────
         self.declare_parameter("base_frame", "base_link")
@@ -223,7 +231,8 @@ class UprightCupPoseNode(Node):
 
         self.pick_point_method = str(
             self.get_parameter("pick_point_method").value).strip().lower()
-        if self.pick_point_method not in ("inscribed", "hough", "centroid"):
+        if self.pick_point_method not in (
+                "top_hole", "inscribed", "hough", "centroid"):
             self.get_logger().warn(
                 f"unknown pick_point_method '{self.pick_point_method}', "
                 f"falling back to 'inscribed'")
@@ -235,6 +244,16 @@ class UprightCupPoseNode(Node):
             self.get_parameter("hough_min_radius_ratio").value)
         self.hough_max_radius_ratio = float(
             self.get_parameter("hough_max_radius_ratio").value)
+        self.top_hole_face_ratio = float(
+            self.get_parameter("top_hole_face_ratio").value)
+        self.top_hole_min_circularity = float(
+            self.get_parameter("top_hole_min_circularity").value)
+        self.top_hole_dark_percentile = float(
+            self.get_parameter("top_hole_dark_percentile").value)
+        self.top_hole_min_area_frac = float(
+            self.get_parameter("top_hole_min_area_frac").value)
+        self.top_hole_max_area_frac = float(
+            self.get_parameter("top_hole_max_area_frac").value)
 
         self.base_frame = str(self.get_parameter("base_frame").value)
         calib_file = str(self.get_parameter("calib_file").value)
@@ -418,6 +437,12 @@ class UprightCupPoseNode(Node):
         method = self.pick_point_method
         if method == "centroid":
             return centroid, None
+        if method == "top_hole":
+            res = self._top_hole(frame_bgr, binary, centroid)
+            if res is not None:
+                return res
+            # 홀 검출 실패 → 내접원으로 폴백
+            return self._inscribed_circle(binary, centroid)
         if method == "hough":
             res = self._hough_circle(frame_bgr, contour, centroid)
             if res is not None:
@@ -436,6 +461,86 @@ class UprightCupPoseNode(Node):
             return centroid, None
         center = np.array([float(max_loc[0]), float(max_loc[1])], dtype=np.float32)
         return center, float(max_val)
+
+    def _top_hole(self, frame_bgr, binary, centroid):
+        """윗면 도넛 홀(어두운 중앙 구멍)의 중심을 검출. 실패 시 None.
+
+        조명 강건성 설계:
+          1) 탐색 범위를 **윗면(top face)** 으로 한정 — 내접원 디스크 안만 본다.
+             옆면 몸통의 그림자가 '어두운 영역'으로 오검출되는 걸 원천 차단.
+          2) 밝기 임계를 **Otsu**(윗면 픽셀 히스토그램의 골)로 자동 결정 — 절대
+             밝기가 아니라 림(밝음)/홀(어두움) 의 상대 분포로 갈라 조명 변화에 적응.
+             Otsu 가 비정상으로 높을 때만 dark_percentile 상한으로 가드.
+          3) 후보 홀을 **원형도+중심성+면적** 으로 점수화, 볼트구멍 등 작은 잡음과
+             그림자(비원형)를 배제하고 가장 그럴듯한 중앙 큰 홀만 채택.
+          4) 중심은 minEnclosingCircle 가 아니라 **무게중심(moments)** 으로 — 외곽
+             한두 픽셀 노이즈에 덜 흔들린다.
+        """
+        # ── 1) 윗면 영역 = 내접원 디스크 ───────────────────────
+        dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+        _, insc_r, _, insc_loc = cv2.minMaxLoc(dist)
+        if insc_r < 4:
+            return None
+        face_center = np.array([float(insc_loc[0]), float(insc_loc[1])], np.float32)
+        face_r = max(3.0, insc_r * self.top_hole_face_ratio)
+        face = np.zeros_like(binary)
+        cv2.circle(face, (int(face_center[0]), int(face_center[1])),
+                   int(face_r), 255, -1)
+        face = cv2.bitwise_and(face, binary)
+        face_area = float(np.count_nonzero(face))
+        if face_area < 30:
+            return None
+
+        # ── 2) 윗면 픽셀의 밝기(HSV V) → Otsu 임계 (조명 자동 적응) ──
+        v = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)[:, :, 2]
+        vals = v[face > 0]
+        if vals.size < 30:
+            return None
+        otsu_thr, _ = cv2.threshold(
+            vals.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Otsu 가 너무 높게 잡혀 윗면 대부분을 '어둡다'고 하면 가드.
+        cap = float(np.percentile(vals, self.top_hole_dark_percentile))
+        thr = min(float(otsu_thr), cap)
+
+        dark = ((v <= thr) & (face > 0)).astype(np.uint8) * 255
+        dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+
+        cnts, _ = cv2.findContours(
+            dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not cnts:
+            return None
+
+        # ── 3) 후보 홀 점수화: 원형도 + 중심성 + 면적 ──────────
+        min_a = self.top_hole_min_area_frac * face_area
+        max_a = self.top_hole_max_area_frac * face_area
+        best = None
+        for c in cnts:
+            a = float(cv2.contourArea(c))
+            if a < max(min_a, 30.0) or a > max_a:
+                continue
+            (cu, cv_), cr = cv2.minEnclosingCircle(c)
+            if cr < 2:
+                continue
+            circularity = a / (math.pi * cr * cr)
+            if circularity < self.top_hole_min_circularity:
+                continue
+            Mh = cv2.moments(c)
+            if abs(Mh["m00"]) < 1e-6:
+                continue
+            hx = Mh["m10"] / Mh["m00"]
+            hy = Mh["m01"] / Mh["m00"]
+            dist_c = math.hypot(hx - face_center[0], hy - face_center[1])
+            if dist_c > face_r:                 # 윗면 밖 중심은 제외
+                continue
+            # 중앙에 가깝고(원형) 클수록 높은 점수.
+            score = circularity - 0.004 * dist_c + 0.0006 * a
+            if best is None or score > best[0]:
+                best = (score, hx, hy, cr)
+        if best is None:
+            return None
+        center = np.array([best[1], best[2]], dtype=np.float32)
+        return center, float(best[3])
 
     def _hough_circle(self, frame_bgr, contour, centroid):
         """contour bbox ROI 안에서 HoughCircles 로 rim 원을 직접 검출.

@@ -54,15 +54,20 @@ def generate_launch_description():
         # ── pick point: mask 에서 "원(rim)" 중심 산출 방식 ──
         DeclareLaunchArgument(
             "pick_point_method", default_value="inscribed",
-            description="inscribed(내접원, 기본) | hough(원 직접검출) | "
-                        "centroid(기존 무게중심). 옆면 잡혀 길쭉한 mask 의 "
-                        "원 중심을 정확히 잡으려면 inscribed 권장.",
+            description="top_hole(윗면 도넛 홀 중심) | inscribed(내접원, 기본) | "
+                        "hough(원 직접검출) | centroid(기존 무게중심). 컵 입구/관통홀 "
+                        "정밀 pick 은 top_hole, 일반 강건 기본은 inscribed.",
         ),
         DeclareLaunchArgument("hough_dp", default_value="1.2"),
         DeclareLaunchArgument("hough_param1", default_value="100.0"),
         DeclareLaunchArgument("hough_param2", default_value="25.0"),
         DeclareLaunchArgument("hough_min_radius_ratio", default_value="0.25"),
         DeclareLaunchArgument("hough_max_radius_ratio", default_value="0.75"),
+        DeclareLaunchArgument("top_hole_face_ratio", default_value="0.95"),
+        DeclareLaunchArgument("top_hole_min_circularity", default_value="0.45"),
+        DeclareLaunchArgument("top_hole_dark_percentile", default_value="35.0"),
+        DeclareLaunchArgument("top_hole_min_area_frac", default_value="0.01"),
+        DeclareLaunchArgument("top_hole_max_area_frac", default_value="0.7"),
         # ── camera → base_link 변환 ──
         DeclareLaunchArgument("base_frame", default_value="base_link"),
         DeclareLaunchArgument(
@@ -115,6 +120,11 @@ def generate_launch_description():
                 "hough_param2": LaunchConfiguration("hough_param2"),
                 "hough_min_radius_ratio": LaunchConfiguration("hough_min_radius_ratio"),
                 "hough_max_radius_ratio": LaunchConfiguration("hough_max_radius_ratio"),
+                "top_hole_face_ratio": LaunchConfiguration("top_hole_face_ratio"),
+                "top_hole_min_circularity": LaunchConfiguration("top_hole_min_circularity"),
+                "top_hole_dark_percentile": LaunchConfiguration("top_hole_dark_percentile"),
+                "top_hole_min_area_frac": LaunchConfiguration("top_hole_min_area_frac"),
+                "top_hole_max_area_frac": LaunchConfiguration("top_hole_max_area_frac"),
 
                 "base_frame": LaunchConfiguration("base_frame"),
                 "calib_file": LaunchConfiguration("calib_file"),

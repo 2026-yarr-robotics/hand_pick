@@ -47,6 +47,7 @@ seg mask 에 컵 **옆면이 같이 잡혀 길쭉**해지면 기존 방식(mask 
 
 | 값 | 방식 |
 |---|---|
+| `top_hole` | 윗면 **도넛 홀(어두운 중앙 구멍)** 중심. 컵 입구/관통홀 정밀 pick. Otsu+윗면한정+원형도 점수로 조명에 강건, 실패 시 `inscribed` 폴백. |
 | `inscribed` (기본) | distance transform 최댓값 = **가장 큰 내접원 중심**. 옆면 꼬리를 무시하고 둥근 윗부분 중심을 잡음. 튜닝 불필요·강건. |
 | `hough` | `HoughCircles` 로 rim 원 직접 검출 (실패 시 `inscribed` 폴백). |
 | `centroid` | 기존 moments 무게중심 (비교/폴백용). |
