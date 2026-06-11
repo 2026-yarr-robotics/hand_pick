@@ -51,6 +51,18 @@ def generate_launch_description():
             description="pick 대상 YOLO 클래스 이름. 이 클래스 mask 만 사용.",
         ),
         DeclareLaunchArgument("min_mask_area", default_value="300.0"),
+        # ── pick point: mask 에서 "원(rim)" 중심 산출 방식 ──
+        DeclareLaunchArgument(
+            "pick_point_method", default_value="inscribed",
+            description="inscribed(내접원, 기본) | hough(원 직접검출) | "
+                        "centroid(기존 무게중심). 옆면 잡혀 길쭉한 mask 의 "
+                        "원 중심을 정확히 잡으려면 inscribed 권장.",
+        ),
+        DeclareLaunchArgument("hough_dp", default_value="1.2"),
+        DeclareLaunchArgument("hough_param1", default_value="100.0"),
+        DeclareLaunchArgument("hough_param2", default_value="25.0"),
+        DeclareLaunchArgument("hough_min_radius_ratio", default_value="0.25"),
+        DeclareLaunchArgument("hough_max_radius_ratio", default_value="0.75"),
         # ── camera → base_link 변환 ──
         DeclareLaunchArgument("base_frame", default_value="base_link"),
         DeclareLaunchArgument(
@@ -96,6 +108,13 @@ def generate_launch_description():
 
                 "target_class_name": LaunchConfiguration("target_class_name"),
                 "min_mask_area": LaunchConfiguration("min_mask_area"),
+
+                "pick_point_method": LaunchConfiguration("pick_point_method"),
+                "hough_dp": LaunchConfiguration("hough_dp"),
+                "hough_param1": LaunchConfiguration("hough_param1"),
+                "hough_param2": LaunchConfiguration("hough_param2"),
+                "hough_min_radius_ratio": LaunchConfiguration("hough_min_radius_ratio"),
+                "hough_max_radius_ratio": LaunchConfiguration("hough_max_radius_ratio"),
 
                 "base_frame": LaunchConfiguration("base_frame"),
                 "calib_file": LaunchConfiguration("calib_file"),

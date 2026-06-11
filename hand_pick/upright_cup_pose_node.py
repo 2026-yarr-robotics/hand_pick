@@ -177,6 +177,21 @@ class UprightCupPoseNode(Node):
         self.declare_parameter("target_class_name", "upright-cup")
         self.declare_parameter("min_mask_area", 300.0)
 
+        # ── pick point 산출 방식 ────────────────────────────
+        # 똑바로 선 컵을 위에서 보면 윗면 원(rim)이 보이는데, seg mask 에 옆면이
+        # 같이 잡혀 길쭉해지면 moments 무게중심이 원 중심에서 벗어난다. 그래서
+        # mask 에서 "원 부분"만 다시 잡아 그 중심을 pick point 로 쓴다.
+        #   inscribed : distance transform 최댓값 위치 = 가장 큰 내접원 중심 (기본, 강건)
+        #   hough     : 이미지에서 HoughCircles 로 rim 원을 직접 검출
+        #   centroid  : 기존 moments 무게중심 (변경 없음)
+        self.declare_parameter("pick_point_method", "inscribed")
+        # hough 전용 튜닝값 (반지름 비율은 contour bbox 짧은 변 기준).
+        self.declare_parameter("hough_dp", 1.2)
+        self.declare_parameter("hough_param1", 100.0)
+        self.declare_parameter("hough_param2", 25.0)
+        self.declare_parameter("hough_min_radius_ratio", 0.25)
+        self.declare_parameter("hough_max_radius_ratio", 0.75)
+
         # ── 좌표 변환 (camera → base_link) ──────────────────
         self.declare_parameter("base_frame", "base_link")
         # 캘리브 파일. 비우면 pick_node share 의 T_gripper2camera.npy 사용.
@@ -205,6 +220,21 @@ class UprightCupPoseNode(Node):
 
         self.target_class_name = str(self.get_parameter("target_class_name").value)
         self.min_mask_area = float(self.get_parameter("min_mask_area").value)
+
+        self.pick_point_method = str(
+            self.get_parameter("pick_point_method").value).strip().lower()
+        if self.pick_point_method not in ("inscribed", "hough", "centroid"):
+            self.get_logger().warn(
+                f"unknown pick_point_method '{self.pick_point_method}', "
+                f"falling back to 'inscribed'")
+            self.pick_point_method = "inscribed"
+        self.hough_dp = float(self.get_parameter("hough_dp").value)
+        self.hough_param1 = float(self.get_parameter("hough_param1").value)
+        self.hough_param2 = float(self.get_parameter("hough_param2").value)
+        self.hough_min_radius_ratio = float(
+            self.get_parameter("hough_min_radius_ratio").value)
+        self.hough_max_radius_ratio = float(
+            self.get_parameter("hough_max_radius_ratio").value)
 
         self.base_frame = str(self.get_parameter("base_frame").value)
         calib_file = str(self.get_parameter("calib_file").value)
@@ -327,7 +357,7 @@ class UprightCupPoseNode(Node):
         return x, y, z
 
     # ── YOLO mask extraction ─────────────────────────────────
-    def extract_detections(self, result, image_h, image_w):
+    def extract_detections(self, result, frame_bgr, image_h, image_w):
         detections = []
         if result.masks is None or result.masks.data is None:
             return detections
@@ -358,18 +388,93 @@ class UprightCupPoseNode(Node):
                 continue
             cx = float(M["m10"] / M["m00"])
             cy = float(M["m01"] / M["m00"])
+            centroid = np.array([cx, cy], dtype=np.float32)
+
+            # 옆면이 같이 잡혀 길쭉해진 mask 에서 "원(rim)" 중심을 다시 잡는다.
+            center, radius = self.compute_pick_point(
+                frame_bgr, binary, contour, centroid)
+
             conf = float(confs[i]) if confs is not None and i < len(confs) else 1.0
             cls_id = int(clss[i]) if clss is not None and i < len(clss) else -1
             detections.append({
                 "mask": binary,
                 "contour": contour,
                 "area": area,
-                "center": np.array([cx, cy], dtype=np.float32),
+                "center": center,        # pick point (원 중심)
+                "centroid": centroid,    # 기존 무게중심 (debug 비교용)
+                "pick_radius": radius,   # 검출된 원 반지름(px) 또는 None
                 "conf": conf,
                 "cls_id": cls_id,
                 "cls_name": self._class_id_to_name(cls_id),
             })
         return detections
+
+    # ── pick point: mask 의 "원" 중심 산출 ────────────────────
+    def compute_pick_point(self, frame_bgr, binary, contour, centroid):
+        """선택된 방식으로 pick point (u,v) 와 원 반지름(px, 없으면 None) 반환.
+
+        모든 방식은 실패 시 moments 무게중심(centroid)으로 폴백한다.
+        """
+        method = self.pick_point_method
+        if method == "centroid":
+            return centroid, None
+        if method == "hough":
+            res = self._hough_circle(frame_bgr, contour, centroid)
+            if res is not None:
+                return res
+            # hough 실패 → 내접원으로 폴백
+            return self._inscribed_circle(binary, centroid)
+        # 기본: inscribed
+        return self._inscribed_circle(binary, centroid)
+
+    def _inscribed_circle(self, binary, centroid):
+        """distance transform 최댓값 = 가장 큰 내접원 중심. 길쭉한 꼬리(옆면)를
+        무시하고 둥근 윗부분 중심을 잡는다."""
+        dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+        _, max_val, _, max_loc = cv2.minMaxLoc(dist)
+        if max_val <= 0:
+            return centroid, None
+        center = np.array([float(max_loc[0]), float(max_loc[1])], dtype=np.float32)
+        return center, float(max_val)
+
+    def _hough_circle(self, frame_bgr, contour, centroid):
+        """contour bbox ROI 안에서 HoughCircles 로 rim 원을 직접 검출.
+        검출 실패 시 None (호출부가 내접원으로 폴백)."""
+        x, y, w, h = cv2.boundingRect(contour)
+        if min(w, h) < 4:
+            return None
+        pad = int(0.15 * max(w, h))
+        H, W = frame_bgr.shape[:2]
+        x0, y0 = max(0, x - pad), max(0, y - pad)
+        x1, y1 = min(W, x + w + pad), min(H, y + h + pad)
+        roi = frame_bgr[y0:y1, x0:x1]
+        if roi.size == 0:
+            return None
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        gray = cv2.medianBlur(gray, 5)
+
+        half_short = max(2.0, min(w, h) / 2.0)
+        min_r = max(1, int(self.hough_min_radius_ratio * half_short))
+        max_r = max(min_r + 1, int(self.hough_max_radius_ratio * half_short))
+        circles = cv2.HoughCircles(
+            gray, cv2.HOUGH_GRADIENT, dp=self.hough_dp,
+            minDist=half_short,
+            param1=self.hough_param1, param2=self.hough_param2,
+            minRadius=min_r, maxRadius=max_r)
+        if circles is None:
+            return None
+        circles = np.asarray(circles, dtype=np.float32).reshape(-1, 3)
+        # contour 안에 중심이 들어오는 원 중 가장 큰 것을 고른다.
+        best = None
+        for cu, cv_, cr in circles:
+            gu, gv = float(cu) + x0, float(cv_) + y0
+            if cv2.pointPolygonTest(contour, (gu, gv), False) < 0:
+                continue
+            if best is None or cr > best[2]:
+                best = (gu, gv, float(cr))
+        if best is None:
+            return None
+        return np.array([best[0], best[1]], dtype=np.float32), best[2]
 
     def _class_id_to_name(self, cls_id):
         if cls_id is None or cls_id < 0:
@@ -440,7 +545,7 @@ class UprightCupPoseNode(Node):
             self.get_logger().error(f"YOLO inference failed: {e}")
             return
 
-        detections = self.extract_detections(results[0], h, w)
+        detections = self.extract_detections(results[0], frame_bgr, h, w)
         targets = self.filter_target_detections(detections)
 
         cups = []  # [{"xy_base":(x,y), "z_base":z, "color":str, "center":(u,v)}]
@@ -467,11 +572,22 @@ class UprightCupPoseNode(Node):
 
         # ── debug 시각화 ──
         for det in targets:
-            cv2.drawContours(debug, [det["contour"]], -1, (0, 200, 255), 2)
+            cv2.drawContours(debug, [det["contour"]], -1, (0, 200, 255), 1)
+            # 검출된 원(내접원/hough) — 초록 테두리
+            if det.get("pick_radius"):
+                c = det["center"]
+                cv2.circle(debug, (int(c[0]), int(c[1])),
+                           int(det["pick_radius"]), (0, 255, 0), 2)
+            # 기존 무게중심(회색) vs 최종 pick point(빨강) 비교
+            ctr = det.get("centroid")
+            if ctr is not None:
+                cv2.circle(debug, (int(ctr[0]), int(ctr[1])), 3, (160, 160, 160), -1)
             c = det["center"]
-            cv2.circle(debug, (int(c[0]), int(c[1])), 4, (0, 200, 255), -1)
+            cv2.circle(debug, (int(c[0]), int(c[1])), 4, (0, 0, 255), -1)
         cv2.putText(
-            debug, f"upright cups={len(targets)} published={len(cups)}",
+            debug,
+            f"upright cups={len(targets)} published={len(cups)} "
+            f"pick={self.pick_point_method}",
             (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         self.publish_debug(debug, msg.header)
 
