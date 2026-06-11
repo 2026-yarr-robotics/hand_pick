@@ -58,8 +58,7 @@ debug 영상(`/upright_cup/debug_image`)에 컵마다 🟢검출 원 / 🔴최�
 `top_hole` 적용 예시 (🟢윗면 도넛 홀 / 🔴pick=홀 중심 / ⚪기존 centroid). 빨강이
 홀 정중앙에 꽂히고, 회색(centroid)은 옆면 몸통 쪽으로 밀려 있는 것을 볼 수 있다:
 
-![top_hole 예시 1](docs/img/tophole_1.png)
-![top_hole 예시 2](docs/img/tophole_2.png)
+![top_hole 예시](docs/img/tophole_2.png)
 
 원리·수치검증·재현 절차는 [`docs/pick_point.md`](docs/pick_point.md) 참고.
 
