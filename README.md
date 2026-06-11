@@ -62,6 +62,8 @@ debug 영상(`/upright_cup/debug_image`)에 컵마다 🟢검출 원 / 🔴최�
 
 원리·수치검증·재현 절차는 [`docs/pick_point.md`](docs/pick_point.md) 참고.
 
+
+
 ## 빌드
 
 ```bash
