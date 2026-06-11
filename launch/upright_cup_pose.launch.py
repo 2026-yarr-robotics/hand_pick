@@ -79,11 +79,12 @@ def generate_launch_description():
         DeclareLaunchArgument("hough_param2", default_value="25.0"),
         DeclareLaunchArgument("hough_min_radius_ratio", default_value="0.25"),
         DeclareLaunchArgument("hough_max_radius_ratio", default_value="0.75"),
-        DeclareLaunchArgument("top_hole_face_ratio", default_value="0.95"),
+        DeclareLaunchArgument("top_hole_face_ratio", default_value="2.5"),
         DeclareLaunchArgument("top_hole_min_circularity", default_value="0.45"),
         DeclareLaunchArgument("top_hole_dark_percentile", default_value="35.0"),
         DeclareLaunchArgument("top_hole_min_area_frac", default_value="0.01"),
         DeclareLaunchArgument("top_hole_max_area_frac", default_value="0.7"),
+        DeclareLaunchArgument("top_hole_centrality_penalty", default_value="0.4"),
         # ── camera → base_link 변환 ──
         DeclareLaunchArgument("base_frame", default_value="base_link"),
         DeclareLaunchArgument(
@@ -149,6 +150,7 @@ def generate_launch_description():
                 "top_hole_dark_percentile": LaunchConfiguration("top_hole_dark_percentile"),
                 "top_hole_min_area_frac": LaunchConfiguration("top_hole_min_area_frac"),
                 "top_hole_max_area_frac": LaunchConfiguration("top_hole_max_area_frac"),
+                "top_hole_centrality_penalty": LaunchConfiguration("top_hole_centrality_penalty"),
 
                 "base_frame": LaunchConfiguration("base_frame"),
                 "calib_file": LaunchConfiguration("calib_file"),

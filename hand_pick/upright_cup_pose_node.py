@@ -294,11 +294,16 @@ class UprightCupPoseNode(Node):
         self.declare_parameter("hough_max_radius_ratio", 0.75)
         # top_hole 튜닝값. 밝기 임계는 Otsu(조명 자동적응)를 기본으로 쓰고
         # dark_percentile 은 Otsu 가 비정상일 때의 안전 상한이다.
-        self.declare_parameter("top_hole_face_ratio", 0.95)      # 윗면 탐색 반경 = 내접원 r×이값
+        # 탐색 반경 = 내접원 r×이값. 기운 컵은 입구 중심이 내접원(몸통쪽 치우침)에서
+        # 멀어 작게 잡으면 입구가 후보에서 빠진다 → 넉넉히(>=2) 둬 입구를 포함시킨다.
+        self.declare_parameter("top_hole_face_ratio", 2.5)
         self.declare_parameter("top_hole_min_circularity", 0.45)  # 원형도 하한(그림자 제거)
         self.declare_parameter("top_hole_dark_percentile", 35.0)  # Otsu 안전 상한(%)
         self.declare_parameter("top_hole_min_area_frac", 0.01)    # 윗면 대비 홀 최소 면적비
         self.declare_parameter("top_hole_max_area_frac", 0.7)     # 윗면 대비 홀 최대 면적비
+        # 선택 점수 = 면적 × (1 − penalty·(dist/face_r)²). 0 이면 순수 최대 면적,
+        # 클수록 가장자리(볼트홀/그림자) 감점 ↑. 면적 지배로 center 구멍을 고른다.
+        self.declare_parameter("top_hole_centrality_penalty", 0.4)
 
         # ── 좌표 변환 (camera → base_link) ──────────────────
         self.declare_parameter("base_frame", "base_link")
@@ -367,6 +372,8 @@ class UprightCupPoseNode(Node):
             self.get_parameter("top_hole_min_area_frac").value)
         self.top_hole_max_area_frac = float(
             self.get_parameter("top_hole_max_area_frac").value)
+        self.top_hole_centrality_penalty = float(
+            self.get_parameter("top_hole_centrality_penalty").value)
 
         self.base_frame = str(self.get_parameter("base_frame").value)
         calib_file = str(self.get_parameter("calib_file").value)
@@ -667,8 +674,12 @@ class UprightCupPoseNode(Node):
             dist_c = math.hypot(hx - face_center[0], hy - face_center[1])
             if dist_c > face_r:                 # 윗면 밖 중심은 제외
                 continue
-            # 중앙에 가깝고(원형) 클수록 높은 점수.
-            score = circularity - 0.004 * dist_c + 0.0006 * a
+            # 핵심: pick 대상(컵 입구/center 구멍)은 rim 안에서 **가장 큰** 어두운
+            # 영역이고 볼트 구멍은 작다. 따라서 면적을 지배적 가중치로 두고, 중심성은
+            # 가장자리 그림자만 약하게 깎는 보조항으로 쓴다(원형도는 hard gate).
+            #   score = area × (1 − k·(dist/face_r)²)   (k=top_hole_centrality_penalty)
+            r = dist_c / face_r
+            score = a * (1.0 - self.top_hole_centrality_penalty * r * r)
             if best is None or score > best[0]:
                 best = (score, hx, hy, cr)
         if best is None:
