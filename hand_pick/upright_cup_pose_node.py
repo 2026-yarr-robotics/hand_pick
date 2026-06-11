@@ -176,6 +176,9 @@ class UprightCupPoseNode(Node):
 
         self.declare_parameter("target_class_name", "upright-cup")
         self.declare_parameter("min_mask_area", 300.0)
+        # 중복 검출 제거: pick point 가 이 거리(px) 안인 같은 클래스 검출은
+        # conf 높은 것만 남긴다. 0 이하면 비활성. (YOLO NMS 가 못 거른 겹침 정리)
+        self.declare_parameter("dedup_min_dist_px", 25.0)
 
         # ── pick point 산출 방식 ────────────────────────────
         # 똑바로 선 컵을 위에서 보면 윗면 원(rim)이 보이는데, seg mask 에 옆면이
@@ -228,6 +231,8 @@ class UprightCupPoseNode(Node):
 
         self.target_class_name = str(self.get_parameter("target_class_name").value)
         self.min_mask_area = float(self.get_parameter("min_mask_area").value)
+        self.dedup_min_dist_px = float(
+            self.get_parameter("dedup_min_dist_px").value)
 
         self.pick_point_method = str(
             self.get_parameter("pick_point_method").value).strip().lower()
@@ -426,7 +431,28 @@ class UprightCupPoseNode(Node):
                 "cls_id": cls_id,
                 "cls_name": self._class_id_to_name(cls_id),
             })
-        return detections
+        return self._dedup_detections(detections)
+
+    def _dedup_detections(self, detections):
+        """pick point 가 dedup_min_dist_px 안인 **같은 클래스** 검출은 conf 높은
+        것만 남긴다. YOLO NMS 가 못 거른 겹친 중복 검출(같은 컵 두 번)을 정리."""
+        if self.dedup_min_dist_px <= 0 or len(detections) < 2:
+            return detections
+        thr2 = self.dedup_min_dist_px ** 2
+        kept = []
+        for det in sorted(detections, key=lambda d: d["conf"], reverse=True):
+            c = det["center"]
+            dup = False
+            for k in kept:
+                if k["cls_id"] != det["cls_id"]:
+                    continue
+                kc = k["center"]
+                if (c[0] - kc[0]) ** 2 + (c[1] - kc[1]) ** 2 <= thr2:
+                    dup = True
+                    break
+            if not dup:
+                kept.append(det)
+        return kept
 
     # ── pick point: mask 의 "원" 중심 산출 ────────────────────
     def compute_pick_point(self, frame_bgr, binary, contour, centroid):

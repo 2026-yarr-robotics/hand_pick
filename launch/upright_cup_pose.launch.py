@@ -51,6 +51,11 @@ def generate_launch_description():
             description="pick 대상 YOLO 클래스 이름. 이 클래스 mask 만 사용.",
         ),
         DeclareLaunchArgument("min_mask_area", default_value="300.0"),
+        DeclareLaunchArgument(
+            "dedup_min_dist_px", default_value="25.0",
+            description="pick point 가 이 거리(px) 안인 같은 클래스 중복 검출은 "
+                        "conf 높은 것만 남김. 0 이하면 비활성.",
+        ),
         # ── pick point: mask 에서 "원(rim)" 중심 산출 방식 ──
         DeclareLaunchArgument(
             "pick_point_method", default_value="inscribed",
@@ -113,6 +118,7 @@ def generate_launch_description():
 
                 "target_class_name": LaunchConfiguration("target_class_name"),
                 "min_mask_area": LaunchConfiguration("min_mask_area"),
+                "dedup_min_dist_px": LaunchConfiguration("dedup_min_dist_px"),
 
                 "pick_point_method": LaunchConfiguration("pick_point_method"),
                 "hough_dp": LaunchConfiguration("hough_dp"),
