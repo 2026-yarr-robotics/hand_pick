@@ -54,11 +54,7 @@ seg mask 에 컵 **옆면이 같이 잡혀 길쭉**해지면 기존 방식(mask 
 debug 영상(`/upright_cup/debug_image`)에 컵마다 🟢검출 원 / 🔴최종 pick(원 중심) /
 ⚪기존 무게중심을 함께 그려 비교할 수 있다.
 
-![pick point debug](docs/img/pick_point_debug.png)
-
-> 실제 hand-eye 가중치로 컵 영상에 노드와 동일한 검출·내접원 로직을 적용한 결과.
-> 우상단 컵은 옆면이 아래로 잡혀 ⚪무게중심이 내려가 있지만 🔴pick 은 윗면 원 쪽으로
-> 올라온다. 원리·수치검증·재현 절차는 [`docs/pick_point.md`](docs/pick_point.md) 참고.
+원리·수치검증·재현 절차는 [`docs/pick_point.md`](docs/pick_point.md) 참고.
 
 ## 빌드
 
