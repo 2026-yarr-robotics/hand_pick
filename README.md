@@ -55,6 +55,12 @@ seg mask 에 컵 **옆면이 같이 잡혀 길쭉**해지면 기존 방식(mask 
 debug 영상(`/upright_cup/debug_image`)에 컵마다 🟢검출 원 / 🔴최종 pick(원 중심) /
 ⚪기존 무게중심을 함께 그려 비교할 수 있다.
 
+`top_hole` 적용 예시 (🟢윗면 도넛 홀 / 🔴pick=홀 중심 / ⚪기존 centroid). 빨강이
+홀 정중앙에 꽂히고, 회색(centroid)은 옆면 몸통 쪽으로 밀려 있는 것을 볼 수 있다:
+
+![top_hole 예시 1](docs/img/tophole_1.png)
+![top_hole 예시 2](docs/img/tophole_2.png)
+
 원리·수치검증·재현 절차는 [`docs/pick_point.md`](docs/pick_point.md) 참고.
 
 ## 빌드
