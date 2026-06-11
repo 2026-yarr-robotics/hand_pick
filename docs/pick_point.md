@@ -17,7 +17,8 @@
 
 | 값 | 방식 | 특징 |
 |---|---|---|
-| `top_hole` | 윗면 **도넛 홀(어두운 중앙 구멍)** 중심 | 컵 입구/관통홀의 진짜 원 중심을 잡는다. seg mask 는 채워진 실루엣이라 이미지에서 직접 검출. 실패 시 `inscribed` 폴백. (강건성 설계는 아래 참고) |
+| `top_ellipse` | 입구(내부 구멍)에 **타원 피팅** → 중심 | 기운 컵은 원이 타원으로 투영되는데 타원 중심이 기울기 보정된 입구 중심. 부분/비대칭 영역도 경계로 복원해 무게중심보다 강건. 축비 신뢰도 게이트, 실패 시 `inscribed` 폴백. **기운 컵에 가장 정확.** |
+| `top_hole` | 입구(내부 구멍) **무게중심** | 컵 입구/관통홀의 원 중심. seg mask 는 채워진 실루엣이라 이미지에서 직접 검출. 실패 시 `inscribed` 폴백. (강건성 설계는 아래 참고) |
 | `inscribed` (기본) | distance transform 최댓값 위치 = **가장 큰 내접원 중심** | 길쭉한 옆면 꼬리를 무시하고 둥근 윗부분 중심을 잡음. 파라미터 튜닝 불필요, 가장 강건. |
 | `hough` | 이미지에서 `HoughCircles` 로 rim 원을 직접 검출 | '원 검출'에 가장 직접적이나 조명/로고 텍스처에 민감, 반경 튜닝 필요. 실패 시 `inscribed` 폴백. |
 | `centroid` | 기존 moments 무게중심 | 변경 없음 — 비교/폴백용. |
@@ -25,29 +26,35 @@
 `hough` 튜닝값: `hough_dp`, `hough_param1`, `hough_param2`,
 `hough_min_radius_ratio`, `hough_max_radius_ratio` (반경 비율은 contour bbox 짧은 변 기준).
 
-### `top_hole` — 윗면 도넛 홀 검출과 조명 강건성
+### 입구 검출 (`top_ellipse`/`top_hole` 공유 `_find_opening`)
 
-seg mask 만으로는 도넛을 못 뽑는다(채워진 실루엣). 그래서 mask 내부 **이미지**에서
-어두운 중앙 구멍을 찾는데, 단순 밝기 임계는 조명에 약하므로 다음을 적용했다.
+seg mask 만으로는 입구를 못 뽑는다(채워진 실루엣). 그래서 mask 내부 **이미지**에서
+입구(어두운 영역)를 찾는데, 다음을 적용해 강건화했다.
 
-1. **탐색 범위(`×top_hole_face_ratio`, 기본 2.5)** — 내접원 중심 기준 디스크 안의
-   어두운 영역을 본다. **기운 컵은 입구 중심이 내접원(몸통쪽 치우침)에서 멀어**, 좁게
-   잡으면(≈1.0) 입구가 후보에서 빠지고 볼트구멍만 남는다 → 넉넉히(≥2) 둬 입구를 포함.
-2. **Otsu 자동 임계** — 절대 밝기가 아니라 림(밝음)/홀(어두움) 분포의 골을 찾아 갈라
-   조명 변화에 적응. Otsu 가 비정상으로 높으면 `top_hole_dark_percentile` 상한으로 가드.
-3. **면적 지배 선택** — pick 대상(컵 입구/center 구멍)은 rim 안에서 **가장 큰** 어두운
-   영역이고 볼트구멍은 작다. 점수 `= 면적 × (1 − penalty·(dist/face_r)²)` 로 면적을
-   지배항, 중심성을 가장자리 약한 감점으로만 둔다(`top_hole_centrality_penalty`).
-   원형도(`top_hole_min_circularity`)·면적비(`top_hole_min/max_area_frac`)는 hard gate.
-   → 볼트구멍 오선택이 영상 검증에서 **10% → ~4%** 로 감소(나머지는 대부분 자세상
-   입구가 작게 보이는 정상 선택).
-4. **중심은 무게중심(moments)** — minEnclosingCircle 중심보다 외곽 노이즈에 덜 흔들림.
-5. **폴백 체인** `top_hole → inscribed → centroid` — 홀이 안 보이는 가파른 각도·가림에선
-   엉뚱한 값 대신 내접원으로 안전 복귀.
+1. **탐색 범위(`×top_hole_face_ratio`, 기본 2.5)** — 내접원 중심 기준 디스크.
+   **기운 컵은 입구 중심이 내접원(몸통쪽 치우침)에서 멀어**, 좁게 잡으면(≈1.0) 입구가
+   후보에서 빠진다 → 넉넉히(≥2) 둬 입구를 포함.
+2. **Otsu 자동 임계** — 림(밝음)/입구(어두움) 분포의 골을 찾아 갈라 조명에 적응.
+   비정상으로 높으면 `top_hole_dark_percentile` 상한으로 가드.
+3. **내부 구멍 제약(`top_hole_enclosed_only`)** — 어두운 영역 윤곽이 컵 **실루엣
+   가장자리 띠**(`mask−erode`)에 둘레의 `top_hole_border_touch_ratio`(0.10) 이상 닿으면
+   제외. 입구는 rim 에 둘러싸인 **내부 구멍**이라 안 닿고, **컵 옆면이 빛을 등져 생기는
+   몸통 그림자는 실루엣 가장자리에 붙어** 닿는다 → 그림자 오선택을 **위상학적으로 차단**.
+   → 영상 검증(1717 검출): **몸통-그림자 오선택 6.5% → 0%**, 교정된 111개 모두 입구를
+   내부 구멍으로 재선택(폴백 없음).
+4. **면적 지배 선택** — 남은 내부 구멍 중 가장 큰 것 = 입구(볼트구멍은 작아 탈락).
+   `score = 면적 × (1 − penalty·(dist/face_r)²)`. 원형도·면적비는 hard gate.
+   → 볼트구멍 오선택도 **10% → ~4%** 로 감소.
 
-튜닝값: `top_hole_face_ratio`(0.95), `top_hole_min_circularity`(0.45),
-`top_hole_dark_percentile`(35), `top_hole_min_area_frac`(0.01),
-`top_hole_max_area_frac`(0.7).
+이렇게 찾은 입구 윤곽에서 **`top_hole` 은 무게중심**, **`top_ellipse` 는 `fitEllipse`
+중심**을 pick 으로 쓴다(타원은 기울기 보정 + 부분영역 복원 + 축비 신뢰도 게이트).
+실패/저신뢰 시 **`inscribed` 폴백 → 시간 평활**. 영상 검증(node 코드): 1717 검출 중
+타원 1683(98%)·폴백 34(2%)·몸통그림자 0.
+
+튜닝값: `top_hole_face_ratio`(2.5), `top_hole_enclosed_only`(true),
+`top_hole_border_touch_ratio`(0.10), `top_hole_centrality_penalty`(0.4),
+`top_hole_min_circularity`(0.45), `top_hole_dark_percentile`(35),
+`top_hole_min/max_area_frac`(0.01/0.7), `top_ellipse_max_axis_ratio`(3.0).
 
 ### 합성 mask 수치 검증
 

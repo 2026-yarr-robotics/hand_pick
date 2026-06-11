@@ -281,7 +281,8 @@ class UprightCupPoseNode(Node):
         # 똑바로 선 컵을 위에서 보면 윗면 원(rim)이 보이는데, seg mask 에 옆면이
         # 같이 잡혀 길쭉해지면 moments 무게중심이 원 중심에서 벗어난다. 그래서
         # mask 에서 "원 부분"만 다시 잡아 그 중심을 pick point 로 쓴다.
-        #   top_hole  : 윗면 도넛 홀(어두운 중앙 구멍) 중심 — 컵 입구/관통홀 정밀 pick
+        #   top_ellipse : 입구(내부 구멍)에 타원 피팅 → 중심. 기운 컵에 가장 정확.
+        #   top_hole  : 입구(내부 구멍) 무게중심 — 컵 입구/관통홀 정밀 pick
         #   inscribed : distance transform 최댓값 위치 = 가장 큰 내접원 중심 (강건 기본)
         #   hough     : 이미지에서 HoughCircles 로 rim 원을 직접 검출
         #   centroid  : 기존 moments 무게중심 (변경 없음)
@@ -304,6 +305,12 @@ class UprightCupPoseNode(Node):
         # 선택 점수 = 면적 × (1 − penalty·(dist/face_r)²). 0 이면 순수 최대 면적,
         # 클수록 가장자리(볼트홀/그림자) 감점 ↑. 면적 지배로 center 구멍을 고른다.
         self.declare_parameter("top_hole_centrality_penalty", 0.4)
+        # 내부 구멍 제약: 어두운 영역이 실루엣 가장자리에 둘레의 이 비율 이상 닿으면
+        # 몸통 그림자로 보고 제외. 입구(rim 둘러싸인 내부 구멍)만 남긴다.
+        self.declare_parameter("top_hole_enclosed_only", True)
+        self.declare_parameter("top_hole_border_touch_ratio", 0.10)
+        # top_ellipse: 타원 축비(장축/단축)가 이 값 초과면 저신뢰 → inscribed 폴백.
+        self.declare_parameter("top_ellipse_max_axis_ratio", 3.0)
 
         # ── 좌표 변환 (camera → base_link) ──────────────────
         self.declare_parameter("base_frame", "base_link")
@@ -350,7 +357,7 @@ class UprightCupPoseNode(Node):
         self.pick_point_method = str(
             self.get_parameter("pick_point_method").value).strip().lower()
         if self.pick_point_method not in (
-                "top_hole", "inscribed", "hough", "centroid"):
+                "top_ellipse", "top_hole", "inscribed", "hough", "centroid"):
             self.get_logger().warn(
                 f"unknown pick_point_method '{self.pick_point_method}', "
                 f"falling back to 'inscribed'")
@@ -374,6 +381,12 @@ class UprightCupPoseNode(Node):
             self.get_parameter("top_hole_max_area_frac").value)
         self.top_hole_centrality_penalty = float(
             self.get_parameter("top_hole_centrality_penalty").value)
+        self.top_hole_enclosed_only = as_bool(
+            self.get_parameter("top_hole_enclosed_only").value)
+        self.top_hole_border_touch_ratio = float(
+            self.get_parameter("top_hole_border_touch_ratio").value)
+        self.top_ellipse_max_axis_ratio = float(
+            self.get_parameter("top_ellipse_max_axis_ratio").value)
 
         self.base_frame = str(self.get_parameter("base_frame").value)
         calib_file = str(self.get_parameter("calib_file").value)
@@ -578,6 +591,12 @@ class UprightCupPoseNode(Node):
         method = self.pick_point_method
         if method == "centroid":
             return centroid, None
+        if method == "top_ellipse":
+            res = self._top_ellipse(frame_bgr, binary, centroid)
+            if res is not None:
+                return res
+            # 타원 피팅 실패/저신뢰 → 내접원으로 폴백
+            return self._inscribed_circle(binary, centroid)
         if method == "top_hole":
             res = self._top_hole(frame_bgr, binary, centroid)
             if res is not None:
@@ -603,21 +622,21 @@ class UprightCupPoseNode(Node):
         center = np.array([float(max_loc[0]), float(max_loc[1])], dtype=np.float32)
         return center, float(max_val)
 
-    def _top_hole(self, frame_bgr, binary, centroid):
-        """윗면 도넛 홀(어두운 중앙 구멍)의 중심을 검출. 실패 시 None.
+    def _find_opening(self, frame_bgr, binary):
+        """컵 입구(어두운 중앙 영역) 윤곽을 검출해 반환. (contour, face_center, face_r)
+        또는 실패 시 None. top_hole / top_ellipse 가 공유한다.
 
-        조명 강건성 설계:
-          1) 탐색 범위를 **윗면(top face)** 으로 한정 — 내접원 디스크 안만 본다.
-             옆면 몸통의 그림자가 '어두운 영역'으로 오검출되는 걸 원천 차단.
-          2) 밝기 임계를 **Otsu**(윗면 픽셀 히스토그램의 골)로 자동 결정 — 절대
-             밝기가 아니라 림(밝음)/홀(어두움) 의 상대 분포로 갈라 조명 변화에 적응.
-             Otsu 가 비정상으로 높을 때만 dark_percentile 상한으로 가드.
-          3) 후보 홀을 **원형도+중심성+면적** 으로 점수화, 볼트구멍 등 작은 잡음과
-             그림자(비원형)를 배제하고 가장 그럴듯한 중앙 큰 홀만 채택.
-          4) 중심은 minEnclosingCircle 가 아니라 **무게중심(moments)** 으로 — 외곽
-             한두 픽셀 노이즈에 덜 흔들린다.
+        강건성 설계:
+          1) 탐색 범위 = 내접원 디스크(`×face_ratio`, 기본 2.5). 기운 컵 입구가
+             내접원(몸통쪽 치우침)에서 멀어도 포함되도록 넉넉히 둔다.
+          2) Otsu 자동 임계(조명 적응) + dark_percentile 상한 가드.
+          3) **내부 구멍 제약(enclosed-only)**: 어두운 영역 윤곽이 컵 실루엣 가장자리
+             띠(`mask−erode`)에 둘레의 `border_touch_ratio` 이상 닿으면 제외. 입구는
+             rim 에 둘러싸인 내부 구멍이라 안 닿고, **몸통 옆면 그림자는 실루엣
+             가장자리에 붙어** 닿는다 → 그림자 오선택을 위상학적으로 차단.
+          4) **면적 지배 선택**: pick 대상(입구/center 구멍)은 남은 내부 구멍 중 가장
+             크다(볼트구멍은 작음). score = area × (1 − k·(dist/face_r)²).
         """
-        # ── 1) 윗면 영역 = 내접원 디스크 ───────────────────────
         dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
         _, insc_r, _, insc_loc = cv2.minMaxLoc(dist)
         if insc_r < 4:
@@ -632,14 +651,12 @@ class UprightCupPoseNode(Node):
         if face_area < 30:
             return None
 
-        # ── 2) 윗면 픽셀의 밝기(HSV V) → Otsu 임계 (조명 자동 적응) ──
         v = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)[:, :, 2]
         vals = v[face > 0]
         if vals.size < 30:
             return None
         otsu_thr, _ = cv2.threshold(
             vals.reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        # Otsu 가 너무 높게 잡혀 윗면 대부분을 '어둡다'고 하면 가드.
         cap = float(np.percentile(vals, self.top_hole_dark_percentile))
         thr = min(float(otsu_thr), cap)
 
@@ -647,12 +664,14 @@ class UprightCupPoseNode(Node):
         dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
         dark = cv2.morphologyEx(dark, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
 
+        # 실루엣 가장자리 띠(내부 구멍 판정용).
+        border = cv2.subtract(binary, cv2.erode(binary, np.ones((9, 9), np.uint8)))
+
         cnts, _ = cv2.findContours(
             dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not cnts:
             return None
 
-        # ── 3) 후보 홀 점수화: 원형도 + 중심성 + 면적 ──────────
         min_a = self.top_hole_min_area_frac * face_area
         max_a = self.top_hole_max_area_frac * face_area
         best = None
@@ -674,18 +693,54 @@ class UprightCupPoseNode(Node):
             dist_c = math.hypot(hx - face_center[0], hy - face_center[1])
             if dist_c > face_r:                 # 윗면 밖 중심은 제외
                 continue
-            # 핵심: pick 대상(컵 입구/center 구멍)은 rim 안에서 **가장 큰** 어두운
-            # 영역이고 볼트 구멍은 작다. 따라서 면적을 지배적 가중치로 두고, 중심성은
-            # 가장자리 그림자만 약하게 깎는 보조항으로 쓴다(원형도는 hard gate).
-            #   score = area × (1 − k·(dist/face_r)²)   (k=top_hole_centrality_penalty)
+            # 내부 구멍 제약: 실루엣 가장자리에 많이 닿으면(=몸통 그림자) 제외.
+            if self.top_hole_enclosed_only:
+                bm = np.zeros_like(binary)
+                cv2.drawContours(bm, [c], -1, 255, -1)
+                touch = (cv2.countNonZero(cv2.bitwise_and(bm, border))
+                         / max(cv2.arcLength(c, True), 1.0))
+                if touch > self.top_hole_border_touch_ratio:
+                    continue
             r = dist_c / face_r
             score = a * (1.0 - self.top_hole_centrality_penalty * r * r)
             if best is None or score > best[0]:
-                best = (score, hx, hy, cr)
+                best = (score, c)
         if best is None:
             return None
-        center = np.array([best[1], best[2]], dtype=np.float32)
-        return center, float(best[3])
+        return best[1], face_center, face_r
+
+    def _top_hole(self, frame_bgr, binary, centroid):
+        """입구의 **무게중심(moments)** 을 pick 으로. 실패 시 None."""
+        found = self._find_opening(frame_bgr, binary)
+        if found is None:
+            return None
+        c = found[0]
+        Mh = cv2.moments(c)
+        if abs(Mh["m00"]) < 1e-6:
+            return None
+        center = np.array([Mh["m10"] / Mh["m00"], Mh["m01"] / Mh["m00"]], np.float32)
+        (_, _), cr = cv2.minEnclosingCircle(c)
+        return center, float(cr)
+
+    def _top_ellipse(self, frame_bgr, binary, centroid):
+        """입구에 **타원 피팅** 후 타원 중심을 pick 으로. 실패 시 None.
+
+        기운 컵 입구는 원이 타원으로 투영되는데, fitEllipse 중심이 기울기를 보정한
+        진짜 입구 중심이다. 부분/비대칭 영역에도 경계로 전체 타원을 복원해 무게중심보다
+        강건. 축비(단축/장축)가 비정상이면(과도 기울기·가림·엉뚱한 피팅) 거부 → 폴백.
+        """
+        found = self._find_opening(frame_bgr, binary)
+        if found is None:
+            return None
+        c = found[0]
+        if len(c) < 5:                          # fitEllipse 는 점 5개 이상 필요
+            return None
+        (cx, cy), (MA, ma), _ = cv2.fitEllipse(c)
+        if min(MA, ma) < 4.0:
+            return None
+        if max(MA, ma) / min(MA, ma) > self.top_ellipse_max_axis_ratio:
+            return None                         # 너무 납작 → 신뢰 낮음, 폴백
+        return np.array([cx, cy], np.float32), float((MA + ma) / 4.0)
 
     def _hough_circle(self, frame_bgr, contour, centroid):
         """contour bbox ROI 안에서 HoughCircles 로 rim 원을 직접 검출.

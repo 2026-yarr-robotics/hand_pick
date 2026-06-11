@@ -47,18 +47,20 @@ seg mask 에 컵 **옆면이 같이 잡혀 길쭉**해지면 기존 방식(mask 
 
 | 값 | 방식 |
 |---|---|
-| `top_hole` | 윗면 **도넛 홀(어두운 중앙 구멍)** 중심. 컵 입구/관통홀 정밀 pick. Otsu+윗면한정+원형도 점수로 조명에 강건, 실패 시 `inscribed` 폴백. |
+| `top_ellipse` | 입구(내부 구멍)에 **타원 피팅** → 중심. 기운 컵은 원이 타원으로 투영되는데 타원 중심이 기울기 보정된 입구 중심. **가장 정확**, 실패/저신뢰 시 `inscribed` 폴백. |
+| `top_hole` | 입구(내부 구멍) **무게중심**. 컵 입구/관통홀 정밀 pick. |
 | `inscribed` (기본) | distance transform 최댓값 = **가장 큰 내접원 중심**. 옆면 꼬리를 무시하고 둥근 윗부분 중심을 잡음. 튜닝 불필요·강건. |
 | `hough` | `HoughCircles` 로 rim 원 직접 검출 (실패 시 `inscribed` 폴백). |
 | `centroid` | 기존 moments 무게중심 (비교/폴백용). |
 
-debug 영상(`/upright_cup/debug_image`)에 컵마다 🟢검출 원 / 🔴최종 pick(원 중심) /
-⚪기존 무게중심을 함께 그려 비교할 수 있다.
+`top_ellipse`/`top_hole` 은 입구를 **내부 구멍(rim 에 둘러싸여 실루엣 가장자리에 안
+닿는 어두운 영역)** 으로 찾아, 컵 옆면이 빛을 등져 생기는 **몸통 그림자 오선택을
+위상학적으로 차단**한다(영상 검증: 몸통-그림자 오선택 6.5% → 0%).
 
-`top_hole` 적용 예시 (🟢윗면 도넛 홀 / 🔴pick=홀 중심 / ⚪기존 centroid). 빨강이
-홀 정중앙에 꽂히고, 회색(centroid)은 옆면 몸통 쪽으로 밀려 있는 것을 볼 수 있다:
+`top_ellipse` 적용 데모 (🟢입구 타원 / 🔴pick=타원 중심). 기운 컵에서도 몸통 그림자로
+새지 않고 입구 중심에 안정적으로 붙는다:
 
-![top_hole 예시](docs/img/tophole_2.png)
+![top_ellipse 데모](docs/img/top_ellipse_demo.gif)
 
 원리·수치검증·재현 절차는 [`docs/pick_point.md`](docs/pick_point.md) 참고.
 

@@ -70,9 +70,8 @@ def generate_launch_description():
         # ── pick point: mask 에서 "원(rim)" 중심 산출 방식 ──
         DeclareLaunchArgument(
             "pick_point_method", default_value="inscribed",
-            description="top_hole(윗면 도넛 홀 중심) | inscribed(내접원, 기본) | "
-                        "hough(원 직접검출) | centroid(기존 무게중심). 컵 입구/관통홀 "
-                        "정밀 pick 은 top_hole, 일반 강건 기본은 inscribed.",
+            description="top_ellipse(입구 타원 피팅, 기운 컵 최정확) | top_hole(입구 "
+                        "무게중심) | inscribed(내접원, 기본) | hough | centroid.",
         ),
         DeclareLaunchArgument("hough_dp", default_value="1.2"),
         DeclareLaunchArgument("hough_param1", default_value="100.0"),
@@ -85,6 +84,9 @@ def generate_launch_description():
         DeclareLaunchArgument("top_hole_min_area_frac", default_value="0.01"),
         DeclareLaunchArgument("top_hole_max_area_frac", default_value="0.7"),
         DeclareLaunchArgument("top_hole_centrality_penalty", default_value="0.4"),
+        DeclareLaunchArgument("top_hole_enclosed_only", default_value="true"),
+        DeclareLaunchArgument("top_hole_border_touch_ratio", default_value="0.10"),
+        DeclareLaunchArgument("top_ellipse_max_axis_ratio", default_value="3.0"),
         # ── camera → base_link 변환 ──
         DeclareLaunchArgument("base_frame", default_value="base_link"),
         DeclareLaunchArgument(
@@ -151,6 +153,9 @@ def generate_launch_description():
                 "top_hole_min_area_frac": LaunchConfiguration("top_hole_min_area_frac"),
                 "top_hole_max_area_frac": LaunchConfiguration("top_hole_max_area_frac"),
                 "top_hole_centrality_penalty": LaunchConfiguration("top_hole_centrality_penalty"),
+                "top_hole_enclosed_only": LaunchConfiguration("top_hole_enclosed_only"),
+                "top_hole_border_touch_ratio": LaunchConfiguration("top_hole_border_touch_ratio"),
+                "top_ellipse_max_axis_ratio": LaunchConfiguration("top_ellipse_max_axis_ratio"),
 
                 "base_frame": LaunchConfiguration("base_frame"),
                 "calib_file": LaunchConfiguration("calib_file"),
